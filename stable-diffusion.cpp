@@ -3168,7 +3168,7 @@ sd_ctx_t* new_sd_ctx(const sd_ctx_params_t* sd_ctx_params) {
 }
 
 void free_sd_ctx(sd_ctx_t* sd_ctx) {
-    if (sd_ctx->sd != nullptr) {
+    if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
         delete sd_ctx->sd;
         sd_ctx->sd = nullptr;
     }
