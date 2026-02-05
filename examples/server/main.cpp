@@ -7,6 +7,7 @@
 #include <mutex>
 #include <sstream>
 #include <vector>
+#include <filesystem>
 
 #include "httplib.h"
 #include "stable-diffusion.h"
@@ -93,6 +94,8 @@ struct SDSvrParams {
     bool normal_exit = false;
     bool verbose     = false;
     bool color       = false;
+    bool reinit_sd   = false;
+    std::string models_root_path;
 
     ArgOptions get_options() {
         ArgOptions options;
@@ -105,7 +108,12 @@ struct SDSvrParams {
             {"",
              "--serve-html-path",
              "path to HTML file to serve at root (optional)",
-             &serve_html_path}};
+             &serve_html_path},
+            {"",
+             "--models-root-path",
+             "path to models root (with vae/llm/diff subfolders)",
+             &models_root_path}
+        };
 
         options.int_options = {
             {"",
@@ -123,6 +131,10 @@ struct SDSvrParams {
              "--color",
              "colors the logging tags according to level",
              true, &color},
+            {"",
+             "--reinit-context",
+             "drop context after generation and re-create at next request",
+             true, &reinit_sd},
         };
 
         auto on_help_arg = [&](int argc, const char** argv, int index) {
@@ -161,8 +173,10 @@ struct SDSvrParams {
         std::ostringstream oss;
         oss << "SDSvrParams {\n"
             << "  listen_ip: " << listen_ip << ",\n"
-            << "  listen_port: \"" << listen_port << "\",\n"
+            << "  listen_port: " << listen_port << ",\n"
             << "  serve_html_path: \"" << serve_html_path << "\",\n"
+            << "  models root path: \"" << models_root_path << "\",\n"
+            << "  reinit context: " << ( reinit_sd ? "true" : "false" ) << ",\n"
             << "}";
         return oss.str();
     }
@@ -263,6 +277,8 @@ void sd_log_cb(enum sd_log_level_t level, const char* log, void* data) {
     log_print(level, log, svr_params->verbose, svr_params->color);
 }
 
+std::mutex sd_ctx_mutex;
+
 int main(int argc, const char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--version") {
         std::cout << version_string() << "\n";
@@ -283,7 +299,9 @@ int main(int argc, const char** argv) {
     LOG_DEBUG("%s", ctx_params.to_string().c_str());
     LOG_DEBUG("%s", default_gen_params.to_string().c_str());
 
-    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, false, false);
+    auto t0 = std::chrono::system_clock::now();
+
+    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
     sd_ctx_t* sd_ctx              = new_sd_ctx(&sd_ctx_params);
 
     if (sd_ctx == nullptr) {
@@ -291,7 +309,18 @@ int main(int argc, const char** argv) {
         return 1;
     }
 
-    std::mutex sd_ctx_mutex;
+    auto t1 = std::chrono::system_clock::now();
+    if (svr_params.reinit_sd) {
+        free_sd_ctx( sd_ctx );
+        sd_ctx = nullptr;
+    }
+    auto t2 = std::chrono::system_clock::now();
+    std::chrono::duration<float, std::ratio<1,1>> dt1 = t1 - t0;
+    LOG_DEBUG("init sd_ctx: %.3f", dt1.count() );
+    if (svr_params.reinit_sd) {
+        std::chrono::duration<float, std::ratio<1,1>> dt2 = t2 - t1;
+        LOG_DEBUG("free sd_ctx: %.3f", dt2.count() );
+    }
 
     httplib::Server svr;
 
@@ -324,7 +353,7 @@ int main(int argc, const char** argv) {
                 res.set_content("Error: Unable to read HTML file", "text/plain");
             }
         } else {
-            res.set_content("Stable Diffusion Server is running", "text/plain");
+            res.set_content("Stable Diffusion Server is running (AKVIS branch)", "text/plain");
         }
     });
 
@@ -456,8 +485,19 @@ int main(int argc, const char** argv) {
 
             {
                 std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (!sd_ctx) {
+                    t0 = std::chrono::system_clock::now();
+                    sd_ctx = new_sd_ctx(&sd_ctx_params);
+                    t1 = std::chrono::system_clock::now();
+                    dt1 = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
+                }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
+                if (svr_params.reinit_sd) {
+                    free_sd_ctx( sd_ctx );
+                    sd_ctx = nullptr;
+                }
             }
 
             for (int i = 0; i < num_results; i++) {
@@ -1039,6 +1079,29 @@ int main(int argc, const char** argv) {
         json r;
         r["samples_format"]      = "png";
         r["sd_model_checkpoint"] = model_path.stem();
+        res.set_content(r.dump(), "application/json");
+    });
+
+    svr.Get("/akvis/v1/models", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_header( "Cache-Control", "no-cache" );
+        if (svr_params.models_root_path.empty()) {
+            res.status = 500;
+            res.set_content(R"({"error":"empty models root path"})", "application/json");
+            return;
+        }
+
+        auto models_list = [&](const std::string& subdir) {
+            std::vector<std::string> res;
+            auto dir = svr_params.models_root_path + "/" + subdir;
+            for (const auto& entry: std::filesystem::directory_iterator{dir}) {
+                if (entry.is_regular_file())
+                    res.push_back( entry.path().filename().string() );
+            }
+            return res;
+        };
+        json r;
+        for ( const std::string& s: { "llm", "vae", "diff", "lora" } )
+            r[s] = models_list(s);
         res.set_content(r.dump(), "application/json");
     });
 
