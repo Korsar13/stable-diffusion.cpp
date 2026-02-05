@@ -712,8 +712,15 @@ int main(int argc, const char** argv) {
 
             {
                 std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (!sd_ctx) {
+                    sd_ctx = new_sd_ctx(&sd_ctx_params);
+                }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
+                if (svr_params.reinit_sd) {
+                    free_sd_ctx(sd_ctx);
+                    sd_ctx = nullptr;
+                }
             }
 
             json out;
@@ -968,8 +975,15 @@ int main(int argc, const char** argv) {
 
             {
                 std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (!sd_ctx) {
+                    sd_ctx = new_sd_ctx(&sd_ctx_params);
+                }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
+                if (svr_params.reinit_sd) {
+                    free_sd_ctx(sd_ctx);
+                    sd_ctx = nullptr;
+                }
             }
 
             json out;
