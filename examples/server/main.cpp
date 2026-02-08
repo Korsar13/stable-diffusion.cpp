@@ -7,7 +7,6 @@
 #include <mutex>
 #include <sstream>
 #include <vector>
-#include <filesystem>
 
 #include "httplib.h"
 #include "stable-diffusion.h"
@@ -1107,7 +1106,7 @@ int main(int argc, const char** argv) {
         auto models_list = [&](const std::string& subdir) {
             std::vector<std::string> res;
             auto dir = svr_params.models_root_path + "/" + subdir;
-            for (const auto& entry: std::filesystem::directory_iterator{dir}) {
+            for (const auto& entry: fs::directory_iterator{dir}) {
                 if (entry.is_regular_file())
                     res.push_back( entry.path().filename().string() );
             }
