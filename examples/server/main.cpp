@@ -276,7 +276,38 @@ void sd_log_cb(enum sd_log_level_t level, const char* log, void* data) {
     log_print(level, log, svr_params->verbose, svr_params->color);
 }
 
+std::string req_id(const httplib::Request& req) {
+    if (req.has_header("Request-ID"))
+        return req.get_header_value("Request-ID");
+
+    static std::atomic<size_t> autonum = 0;
+    return req.remote_addr + " #" + std::to_string( autonum++ );
+}
+
+enum class SDState { Unknown, Queued, Running, Processed };
+enum class SDStage { Unknown, Loading, LLM, Diff, Vae, Srgan, Send };
+
+struct SDRequest {
+    std::string id;
+    std::string remote_addr;
+    std::string req_body;
+    std::string result;
+    int result_status = -1;
+    SDState state = SDState::Unknown;
+    SDStage stage = SDStage::Unknown;
+};
+
+struct SDQueue {
+    void add_request( const httplib::Request& req );
+
+
+private:
+    std::vector<SDRequest> v;
+    std::mutex mtx;
+};
+
 std::mutex sd_ctx_mutex;
+
 
 int main(int argc, const char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--version") {
