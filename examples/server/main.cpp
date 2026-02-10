@@ -285,20 +285,19 @@ std::string req_id(const httplib::Request& req) {
 }
 
 enum class SDState { Unknown, Queued, Running, Processed };
-enum class SDStage { Unknown, Loading, LLM, Diff, Vae, Srgan, Send };
+enum class SDRunStage { Unknown, Loading, LLM, Diff, Vae, Srgan, Send };
 
 struct SDRequest {
+    const httplib::Request *req = nullptr;
+    httplib::Response      *res = nullptr;
     std::string id;
-    std::string remote_addr;
-    std::string req_body;
-    std::string result;
-    int result_status = -1;
+    SDContextParams ctx_prm;
+    SDGenerationParams gen_prm;
     SDState state = SDState::Unknown;
-    SDStage stage = SDStage::Unknown;
+    SDRunStage stage = SDRunStage::Unknown;
 };
 
 struct SDQueue {
-    void add_request( const httplib::Request& req );
 
 
 private:
@@ -306,8 +305,7 @@ private:
     std::mutex mtx;
 };
 
-std::mutex sd_ctx_mutex;
-
+std::mutex sd_mutex;
 
 int main(int argc, const char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--version") {
@@ -514,9 +512,10 @@ int main(int argc, const char** argv) {
             int num_results     = 0;
 
             {
-                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
                     t0 = std::chrono::system_clock::now();
+                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
                     sd_ctx = new_sd_ctx(&sd_ctx_params);
                     t1 = std::chrono::system_clock::now();
                     dt1 = t1 - t0;
@@ -741,9 +740,14 @@ int main(int argc, const char** argv) {
             int num_results     = 0;
 
             {
-                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
+                    t0 = std::chrono::system_clock::now();
+                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
                     sd_ctx = new_sd_ctx(&sd_ctx_params);
+                    t1 = std::chrono::system_clock::now();
+                    dt1 = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
                 }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
@@ -1004,9 +1008,14 @@ int main(int argc, const char** argv) {
             int num_results     = 0;
 
             {
-                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
+                    t0 = std::chrono::system_clock::now();
+                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
                     sd_ctx = new_sd_ctx(&sd_ctx_params);
+                    t1 = std::chrono::system_clock::now();
+                    dt1 = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
                 }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
