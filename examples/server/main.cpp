@@ -283,6 +283,9 @@ struct LoraEntry {
 
 // K13 -- begin
 
+std::mutex sd_mutex;
+sd_ctx_t* sd_ctx = nullptr;
+
 std::string req_id(const httplib::Request& req) {
     if (req.has_header("Request-ID"))
         return req.get_header_value("Request-ID");
@@ -319,9 +322,79 @@ private:
     std::mutex mtx;
 };
 
-// K13 - end
+void report_error_json(httplib::Response& res, std::string_view msg) {
+    res.status = 400;
+    json err;
+    err["error"] = msg;
+    res.set_content(err.dump(), "application/json");
+}
 
-std::mutex sd_mutex;
+void report_server_error_json(httplib::Response& res, std::string_view msg) {
+    res.status = 500;
+    json err;
+    err["error"]   = "server_error";
+    err["message"] = msg;
+    res.set_content(err.dump(), "application/json");
+}
+
+sd_image_t* sd_generate_image(const SDSvrParams& svr_params, SDContextParams& ctx_params, const sd_img_gen_params_t& img_gen_params) {
+    std::lock_guard<std::mutex> lock(sd_mutex);
+    if (!sd_ctx) {
+        auto t0                       = std::chrono::system_clock::now();
+        sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
+        sd_ctx                        = new_sd_ctx(&sd_ctx_params);
+        auto t1                       = std::chrono::system_clock::now();
+        auto dt1                      = t1 - t0;
+        LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
+        if (!sd_ctx) {
+            return nullptr;
+        }
+    }
+    sd_image_t* results = generate_image(sd_ctx, &img_gen_params);
+    if (svr_params.reinit_sd) {
+        free_sd_ctx(sd_ctx);
+        sd_ctx = nullptr;
+    }
+    return results;
+}
+
+std::vector<std::string> encode_images_base64(sd_image_t* img, int count, const std::string& output_format, int output_compression) {
+    std::vector<std::string> res;
+    if (!img)
+        return res;
+
+    for (int i = 0; i < count; i++) {
+        if (img[i].data == nullptr) {
+            continue;
+        }
+        auto image_bytes = write_image_to_vector(output_format == "jpeg" ? ImageFormat::JPEG : ImageFormat::PNG,
+                                                 img[i].data,
+                                                 img[i].width,
+                                                 img[i].height,
+                                                 img[i].channel,
+                                                 output_compression);
+        if (image_bytes.empty()) {
+            LOG_ERROR("write image to mem failed");
+            continue;
+        }
+        res.push_back(base64_encode(image_bytes));
+        // base64 encode
+    }
+    return res;
+}
+
+void free_images(sd_image_t* img, int count) {
+    if (!img)
+        return;
+
+    for (int i = 0; i < count; ++i) {
+        if (img->data)
+            stbi_image_free(img->data);
+    }
+    free(img);
+}
+
+// K13 - end
 
 int main(int argc, const char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--version") {
@@ -346,7 +419,7 @@ int main(int argc, const char** argv) {
     auto t0 = std::chrono::system_clock::now();
 
     sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-    sd_ctx_t* sd_ctx              = new_sd_ctx(&sd_ctx_params);
+    sd_ctx                        = new_sd_ctx(&sd_ctx_params);
 
     if (sd_ctx == nullptr) {
         LOG_ERROR("new_sd_ctx_t failed");
@@ -461,8 +534,7 @@ int main(int argc, const char** argv) {
     svr.Post("/v1/images/generations", [&](const httplib::Request& req, httplib::Response& res) {
         try {
             if (req.body.empty()) {
-                res.status = 400;
-                res.set_content(R"({"error":"empty body"})", "application/json");
+                report_error_json(res, "empty body");
                 return;
             }
 
@@ -486,16 +558,14 @@ int main(int argc, const char** argv) {
             }
 
             if (prompt.empty()) {
-                res.status = 400;
-                res.set_content(R"({"error":"prompt required"})", "application/json");
+                report_error_json(res, "prompt required");
                 return;
             }
 
             std::string sd_cpp_extra_args_str = extract_and_remove_sd_cpp_extra_args(prompt);
 
             if (output_format != "png" && output_format != "jpeg") {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid output_format, must be one of [png, jpeg]"})", "application/json");
+                report_error_json(res, "invalid output_format, must be one of [png, jpeg]");
                 return;
             }
             if (n <= 0)
@@ -521,8 +591,7 @@ int main(int argc, const char** argv) {
             gen_params.batch_count        = n;
 
             if (!sd_cpp_extra_args_str.empty() && !gen_params.from_json_str(sd_cpp_extra_args_str)) {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
+                report_error_json(res, "invalid sd_cpp_extra_args");
                 return;
             }
 
@@ -530,8 +599,7 @@ int main(int argc, const char** argv) {
                 gen_params.sample_params.sample_steps = 100;
 
             if (!gen_params.process_and_check(IMG_GEN, "")) {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid params"})", "application/json");
+                report_error_json(res, "invalid params");
                 return;
             }
 
@@ -572,26 +640,12 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            sd_image_t* results = nullptr;
-            int num_results     = 0;
-
-            {
-                std::lock_guard<std::mutex> lock(sd_mutex);
-                if (!sd_ctx) {
-                    t0            = std::chrono::system_clock::now();
-                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
-                    t1            = std::chrono::system_clock::now();
-                    dt1           = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
-                }
-                results     = generate_image(sd_ctx, &img_gen_params);
-                num_results = gen_params.batch_count;
-                if (svr_params.reinit_sd) {
-                    free_sd_ctx(sd_ctx);
-                    sd_ctx = nullptr;
-                }
+            sd_image_t* results = sd_generate_image(svr_params, ctx_params, img_gen_params);
+            if (!results) {
+                report_server_error_json(res, "re-init context failed");
+                return;
             }
+            int num_results = gen_params.batch_count;
 
             for (int i = 0; i < num_results; i++) {
                 if (results[i].data == nullptr) {
@@ -619,26 +673,20 @@ int main(int argc, const char** argv) {
             res.status = 200;
 
         } catch (const std::exception& e) {
-            res.status = 500;
-            json err;
-            err["error"]   = "server_error";
-            err["message"] = e.what();
-            res.set_content(err.dump(), "application/json");
+            report_server_error_json(res, e.what());
         }
     });
 
     svr.Post("/v1/images/edits", [&](const httplib::Request& req, httplib::Response& res) {
         try {
             if (!req.is_multipart_form_data()) {
-                res.status = 400;
-                res.set_content(R"({"error":"Content-Type must be multipart/form-data"})", "application/json");
+                report_error_json(res, "Content-Type must be multipart/form-data");
                 return;
             }
 
             std::string prompt = req.form.get_field("prompt");
             if (prompt.empty()) {
-                res.status = 400;
-                res.set_content(R"({"error":"prompt required"})", "application/json");
+                report_error_json(res, "prompt required");
                 return;
             }
 
@@ -646,8 +694,7 @@ int main(int argc, const char** argv) {
 
             size_t image_count = req.form.get_file_count("image[]");
             if (image_count == 0) {
-                res.status = 400;
-                res.set_content(R"({"error":"at least one image[] required"})", "application/json");
+                report_error_json(res, "at least one image[] required");
                 return;
             }
 
@@ -689,8 +736,7 @@ int main(int argc, const char** argv) {
             if (req.form.has_field("output_format"))
                 output_format = req.form.get_field("output_format");
             if (output_format != "png" && output_format != "jpeg") {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid output_format, must be one of [png, jpeg]"})", "application/json");
+                report_error_json(res, "invalid output_format, must be one of [png, jpeg]");
                 return;
             }
 
@@ -714,8 +760,7 @@ int main(int argc, const char** argv) {
             gen_params.batch_count        = n;
 
             if (!sd_cpp_extra_args_str.empty() && !gen_params.from_json_str(sd_cpp_extra_args_str)) {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
+                report_error_json(res, "invalid sd_cpp_extra_args");
                 return;
             }
 
@@ -723,8 +768,7 @@ int main(int argc, const char** argv) {
                 gen_params.sample_params.sample_steps = 100;
 
             if (!gen_params.process_and_check(IMG_GEN, "")) {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid params"})", "application/json");
+                report_error_json(res, "invalid params");
                 return;
             }
 
@@ -825,44 +869,18 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            sd_image_t* results = nullptr;
-            int num_results     = 0;
-
-            {
-                std::lock_guard<std::mutex> lock(sd_mutex);
-                if (!sd_ctx) {
-                    t0            = std::chrono::system_clock::now();
-                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
-                    t1            = std::chrono::system_clock::now();
-                    dt1           = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
-                }
-                results     = generate_image(sd_ctx, &img_gen_params);
-                num_results = gen_params.batch_count;
-                if (svr_params.reinit_sd) {
-                    free_sd_ctx(sd_ctx);
-                    sd_ctx = nullptr;
-                }
-            }
+            auto result_images = sd_generate_image(svr_params, ctx_params, img_gen_params);
+            auto results       = encode_images_base64(result_images, img_gen_params.batch_count, output_format, output_compression);
+            free_images(result_images, img_gen_params.batch_count);
 
             json out;
             out["created"]       = static_cast<long long>(std::time(nullptr));
             out["data"]          = json::array();
             out["output_format"] = output_format;
 
-            for (int i = 0; i < num_results; i++) {
-                if (results[i].data == nullptr)
-                    continue;
-                auto image_bytes = write_image_to_vector(output_format == "jpeg" ? ImageFormat::JPEG : ImageFormat::PNG,
-                                                         results[i].data,
-                                                         results[i].width,
-                                                         results[i].height,
-                                                         results[i].channel,
-                                                         output_compression);
-                std::string b64 = base64_encode(image_bytes);
+            for (const auto& s : results) {
                 json item;
-                item["b64_json"] = b64;
+                item["b64_json"] = s;
                 out["data"].push_back(item);
             }
 
@@ -879,11 +897,7 @@ int main(int argc, const char** argv) {
                 stbi_image_free(ref_image.data);
             }
         } catch (const std::exception& e) {
-            res.status = 500;
-            json err;
-            err["error"]   = "server_error";
-            err["message"] = e.what();
-            res.set_content(err.dump(), "application/json");
+            report_server_error_json(res, e.what());
         }
     });
 
@@ -892,8 +906,7 @@ int main(int argc, const char** argv) {
     auto sdapi_any2img = [&](const httplib::Request& req, httplib::Response& res, bool img2img) {
         try {
             if (req.body.empty()) {
-                res.status = 400;
-                res.set_content(R"({"error":"empty body"})", "application/json");
+                report_error_json(res, "empty body");
                 return;
             }
 
@@ -911,9 +924,8 @@ int main(int argc, const char** argv) {
             std::string sampler_name    = j.value("sampler_name", "");
             std::string scheduler_name  = j.value("scheduler", "");
 
-            auto bad = [&](const std::string& msg) {
-                res.status = 400;
-                res.set_content("{\"error\":\"" + msg + "\"}", "application/json");
+            auto bad = [&](std::string_view msg) {
+                report_error_json(res, msg);
                 return;
             };
 
@@ -1151,26 +1163,8 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            sd_image_t* results = nullptr;
-            int num_results     = 0;
-
-            {
-                std::lock_guard<std::mutex> lock(sd_mutex);
-                if (!sd_ctx) {
-                    t0            = std::chrono::system_clock::now();
-                    sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
-                    t1            = std::chrono::system_clock::now();
-                    dt1           = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
-                }
-                results     = generate_image(sd_ctx, &img_gen_params);
-                num_results = gen_params.batch_count;
-                if (svr_params.reinit_sd) {
-                    free_sd_ctx(sd_ctx);
-                    sd_ctx = nullptr;
-                }
-            }
+            sd_image_t* results = sd_generate_image(svr_params, ctx_params, img_gen_params);
+            int num_results     = gen_params.batch_count;
 
             json out;
             out["images"]     = json::array();
@@ -1211,11 +1205,7 @@ int main(int argc, const char** argv) {
             }
 
         } catch (const std::exception& e) {
-            res.status = 500;
-            json err;
-            err["error"]   = "server_error";
-            err["message"] = e.what();
-            res.set_content(err.dump(), "application/json");
+            report_server_error_json(res, e.what());
         }
     };
 
@@ -1302,8 +1292,7 @@ int main(int argc, const char** argv) {
     svr.Get("/akvis/v1/models", [&](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-cache");
         if (svr_params.models_root_path.empty()) {
-            res.status = 500;
-            res.set_content(R"({"error":"empty models root path"})", "application/json");
+            report_error_json(res, "empty models root path");
             return;
         }
 
