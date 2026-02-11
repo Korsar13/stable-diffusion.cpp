@@ -281,6 +281,8 @@ struct LoraEntry {
     std::string path;
 };
 
+// K13 -- begin
+
 std::string req_id(const httplib::Request& req) {
     if (req.has_header("Request-ID"))
         return req.get_header_value("Request-ID");
@@ -309,6 +311,8 @@ private:
     std::vector<SDRequest> v;
     std::mutex mtx;
 };
+
+// K13 - end
 
 std::mutex sd_mutex;
 
