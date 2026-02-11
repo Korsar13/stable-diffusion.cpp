@@ -111,7 +111,7 @@ struct SDSvrParams {
             {"",
              "--models-root-path",
              "path to models root (with vae/llm/diff subfolders)",
-             &models_root_path}
+             &models_root_path},
         };
 
         options.int_options = {
@@ -175,7 +175,7 @@ struct SDSvrParams {
             << "  listen_port: " << listen_port << ",\n"
             << "  serve_html_path: \"" << serve_html_path << "\",\n"
             << "  models root path: \"" << models_root_path << "\",\n"
-            << "  reinit context: " << ( reinit_sd ? "true" : "false" ) << ",\n"
+            << "  reinit context: " << (reinit_sd ? "true" : "false") << ",\n"
             << "}";
         return oss.str();
     }
@@ -288,25 +288,32 @@ std::string req_id(const httplib::Request& req) {
         return req.get_header_value("Request-ID");
 
     static std::atomic<size_t> autonum = 0;
-    return req.remote_addr + " #" + std::to_string( autonum++ );
+    return req.remote_addr + " #" + std::to_string(autonum++);
 }
 
-enum class SDState { Unknown, Queued, Running, Processed };
-enum class SDRunStage { Unknown, Loading, LLM, Diff, Vae, Srgan, Send };
+enum class SDState { Unknown,
+                     Queued,
+                     Running,
+                     Processed };
+enum class SDRunStage { Unknown,
+                        Loading,
+                        LLM,
+                        Diff,
+                        Vae,
+                        Srgan,
+                        Send };
 
 struct SDRequest {
-    const httplib::Request *req = nullptr;
-    httplib::Response      *res = nullptr;
+    const httplib::Request* req = nullptr;
+    httplib::Response* res      = nullptr;
     std::string id;
     SDContextParams ctx_prm;
     SDGenerationParams gen_prm;
-    SDState state = SDState::Unknown;
+    SDState state    = SDState::Unknown;
     SDRunStage stage = SDRunStage::Unknown;
 };
 
 struct SDQueue {
-
-
 private:
     std::vector<SDRequest> v;
     std::mutex mtx;
@@ -348,15 +355,15 @@ int main(int argc, const char** argv) {
 
     auto t1 = std::chrono::system_clock::now();
     if (svr_params.reinit_sd) {
-        free_sd_ctx( sd_ctx );
+        free_sd_ctx(sd_ctx);
         sd_ctx = nullptr;
     }
-    auto t2 = std::chrono::system_clock::now();
-    std::chrono::duration<float, std::ratio<1,1>> dt1 = t1 - t0;
-    LOG_DEBUG("init sd_ctx: %.3f", dt1.count() );
+    auto t2                                            = std::chrono::system_clock::now();
+    std::chrono::duration<float, std::ratio<1, 1>> dt1 = t1 - t0;
+    LOG_DEBUG("init sd_ctx: %.3f", dt1.count());
     if (svr_params.reinit_sd) {
-        std::chrono::duration<float, std::ratio<1,1>> dt2 = t2 - t1;
-        LOG_DEBUG("free sd_ctx: %.3f", dt2.count() );
+        std::chrono::duration<float, std::ratio<1, 1>> dt2 = t2 - t1;
+        LOG_DEBUG("free sd_ctx: %.3f", dt2.count());
     }
 
     std::vector<LoraEntry> lora_cache;
@@ -571,17 +578,17 @@ int main(int argc, const char** argv) {
             {
                 std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
-                    t0 = std::chrono::system_clock::now();
+                    t0            = std::chrono::system_clock::now();
                     sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx = new_sd_ctx(&sd_ctx_params);
-                    t1 = std::chrono::system_clock::now();
-                    dt1 = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
+                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
+                    t1            = std::chrono::system_clock::now();
+                    dt1           = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
                 }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
                 if (svr_params.reinit_sd) {
-                    free_sd_ctx( sd_ctx );
+                    free_sd_ctx(sd_ctx);
                     sd_ctx = nullptr;
                 }
             }
@@ -824,12 +831,12 @@ int main(int argc, const char** argv) {
             {
                 std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
-                    t0 = std::chrono::system_clock::now();
+                    t0            = std::chrono::system_clock::now();
                     sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx = new_sd_ctx(&sd_ctx_params);
-                    t1 = std::chrono::system_clock::now();
-                    dt1 = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
+                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
+                    t1            = std::chrono::system_clock::now();
+                    dt1           = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
                 }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
@@ -993,12 +1000,12 @@ int main(int argc, const char** argv) {
 
             enum scheduler_t scheduler = str_to_scheduler(scheduler_name.c_str());
 
-            SDGenerationParams gen_params         = default_gen_params;
-            gen_params.prompt                     = prompt;
-            gen_params.negative_prompt            = negative_prompt;
-            gen_params.seed                       = seed;
-            gen_params.sample_params.sample_steps = steps;
-            gen_params.batch_count                = batch_size;
+            SDGenerationParams gen_params             = default_gen_params;
+            gen_params.prompt                         = prompt;
+            gen_params.negative_prompt                = negative_prompt;
+            gen_params.seed                           = seed;
+            gen_params.sample_params.sample_steps     = steps;
+            gen_params.batch_count                    = batch_size;
             gen_params.sample_params.guidance.txt_cfg = cfg_scale;
 
             if (clip_skip > 0) {
@@ -1043,13 +1050,13 @@ int main(int argc, const char** argv) {
             };
 
             auto decode_image = [&gen_params](sd_image_t& image, std::string encoded) -> bool {
-                    // remove data URI prefix if present ("data:image/png;base64,")
-                    auto comma_pos = encoded.find(',');
-                    if (comma_pos != std::string::npos) {
-                        encoded = encoded.substr(comma_pos + 1);
-                    }
-                    std::vector<uint8_t> img_data = base64_decode(encoded);
-                    if (!img_data.empty()) {
+                // remove data URI prefix if present ("data:image/png;base64,")
+                auto comma_pos = encoded.find(',');
+                if (comma_pos != std::string::npos) {
+                    encoded = encoded.substr(comma_pos + 1);
+                }
+                std::vector<uint8_t> img_data = base64_decode(encoded);
+                if (!img_data.empty()) {
                     int expected_width  = 0;
                     int expected_height = 0;
                     if (gen_params.width_and_height_are_set()) {
@@ -1059,18 +1066,18 @@ int main(int argc, const char** argv) {
                     int img_w;
                     int img_h;
 
-                        uint8_t* raw_data = load_image_from_memory(
-                            (const char*)img_data.data(), (int)img_data.size(),
-                            img_w, img_h,
+                    uint8_t* raw_data = load_image_from_memory(
+                        (const char*)img_data.data(), (int)img_data.size(),
+                        img_w, img_h,
                         expected_width, expected_height, image.channel);
-                        if (raw_data) {
-                            image = {(uint32_t)img_w, (uint32_t)img_h, image.channel, raw_data};
+                    if (raw_data) {
+                        image = {(uint32_t)img_w, (uint32_t)img_h, image.channel, raw_data};
                         gen_params.set_width_and_height_if_unset(image.width, image.height);
-                            return true;
-                        }
+                        return true;
                     }
-                    return false;
-                };
+                }
+                return false;
+            };
 
             if (img2img) {
                 if (j.contains("init_images") && j["init_images"].is_array() && !j["init_images"].empty()) {
@@ -1104,15 +1111,15 @@ int main(int argc, const char** argv) {
                 }
             }
 
-                if (j.contains("extra_images") && j["extra_images"].is_array()) {
-                    for (auto extra_image : j["extra_images"]) {
-                        std::string encoded  = extra_image.get<std::string>();
-                        sd_image_t tmp_image = {(uint32_t)gen_params.width, (uint32_t)gen_params.height, 3, nullptr};
-                        if (decode_image(tmp_image, encoded)) {
-                            ref_images.push_back(tmp_image);
-                        }
+            if (j.contains("extra_images") && j["extra_images"].is_array()) {
+                for (auto extra_image : j["extra_images"]) {
+                    std::string encoded  = extra_image.get<std::string>();
+                    sd_image_t tmp_image = {(uint32_t)gen_params.width, (uint32_t)gen_params.height, 3, nullptr};
+                    if (decode_image(tmp_image, encoded)) {
+                        ref_images.push_back(tmp_image);
                     }
                 }
+            }
 
             sd_img_gen_params_t img_gen_params = {
                 sd_loras.data(),
@@ -1150,12 +1157,12 @@ int main(int argc, const char** argv) {
             {
                 std::lock_guard<std::mutex> lock(sd_mutex);
                 if (!sd_ctx) {
-                    t0 = std::chrono::system_clock::now();
+                    t0            = std::chrono::system_clock::now();
                     sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-                    sd_ctx = new_sd_ctx(&sd_ctx_params);
-                    t1 = std::chrono::system_clock::now();
-                    dt1 = t1 - t0;
-                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count() );
+                    sd_ctx        = new_sd_ctx(&sd_ctx_params);
+                    t1            = std::chrono::system_clock::now();
+                    dt1           = t1 - t0;
+                    LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
                 }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
@@ -1293,7 +1300,7 @@ int main(int argc, const char** argv) {
     });
 
     svr.Get("/akvis/v1/models", [&](const httplib::Request&, httplib::Response& res) {
-        res.set_header( "Cache-Control", "no-cache" );
+        res.set_header("Cache-Control", "no-cache");
         if (svr_params.models_root_path.empty()) {
             res.status = 500;
             res.set_content(R"({"error":"empty models root path"})", "application/json");
@@ -1303,14 +1310,14 @@ int main(int argc, const char** argv) {
         auto models_list = [&](const std::string& subdir) {
             std::vector<std::string> res;
             auto dir = svr_params.models_root_path + "/" + subdir;
-            for (const auto& entry: fs::directory_iterator{dir}) {
+            for (const auto& entry : fs::directory_iterator{dir}) {
                 if (entry.is_regular_file())
-                    res.push_back( entry.path().filename().string() );
+                    res.push_back(entry.path().filename().string());
             }
             return res;
         };
         json r;
-        for ( const std::string& s: { "llm", "vae", "diff", "lora" } )
+        for (const std::string& s : {"llm", "vae", "diff", "lora"})
             r[s] = models_list(s);
         res.set_content(r.dump(), "application/json");
     });
