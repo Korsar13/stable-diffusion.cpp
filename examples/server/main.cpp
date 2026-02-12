@@ -1,6 +1,7 @@
 // main.cpp
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -337,27 +338,6 @@ void report_server_error_json(httplib::Response& res, std::string_view msg) {
     res.set_content(err.dump(), "application/json");
 }
 
-sd_image_t* sd_generate_image(const SDSvrParams& svr_params, SDContextParams& ctx_params, const sd_img_gen_params_t& img_gen_params) {
-    std::lock_guard<std::mutex> lock(sd_mutex);
-    if (!sd_ctx) {
-        auto t0                       = std::chrono::system_clock::now();
-        sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
-        sd_ctx                        = new_sd_ctx(&sd_ctx_params);
-        auto t1                       = std::chrono::system_clock::now();
-        auto dt1                      = t1 - t0;
-        LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
-        if (!sd_ctx) {
-            return nullptr;
-        }
-    }
-    sd_image_t* results = generate_image(sd_ctx, &img_gen_params);
-    if (svr_params.reinit_sd) {
-        free_sd_ctx(sd_ctx);
-        sd_ctx = nullptr;
-    }
-    return results;
-}
-
 std::vector<std::string> encode_images_base64(sd_image_t* img, int count, const std::string& output_format, int output_compression) {
     std::vector<std::string> res;
     if (!img)
@@ -378,21 +358,60 @@ std::vector<std::string> encode_images_base64(sd_image_t* img, int count, const 
             continue;
         }
         res.push_back(base64_encode(image_bytes));
-        // base64 encode
     }
     return res;
 }
 
-void free_images(sd_image_t* img, int count) {
-    if (!img)
-        return;
-
-    for (int i = 0; i < count; ++i) {
-        if (img->data)
-            stbi_image_free(img->data);
+std::vector<std::string> sd_generate_image(const SDSvrParams& svr_params, SDContextParams& ctx_params, const sd_img_gen_params_t& img_gen_params, const std::string& output_format, int output_compression) {
+    std::lock_guard<std::mutex> lock(sd_mutex);
+    if (!sd_ctx) {
+        auto t0                       = std::chrono::system_clock::now();
+        sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, svr_params.reinit_sd, false);
+        sd_ctx                        = new_sd_ctx(&sd_ctx_params);
+        auto t1                       = std::chrono::system_clock::now();
+        auto dt1                      = t1 - t0;
+        LOG_DEBUG("re-init sd_ctx: %.3f", dt1.count());
+        if (!sd_ctx) {
+            LOG_ERROR("re-init sd_ctx failed");
+            return {};
+        }
     }
-    free(img);
+    auto result_images = generate_image(sd_ctx, &img_gen_params);
+    if (svr_params.reinit_sd) {
+        free_sd_ctx(sd_ctx);
+        sd_ctx = nullptr;
+    }
+    auto results = encode_images_base64(result_images, img_gen_params.batch_count, output_format, output_compression);
+
+    // free image_results
+    if (result_images) {
+        for (int i = 0; i < img_gen_params.batch_count; ++i) {
+            if (result_images[i].data) {
+                stbi_image_free(result_images[i].data);
+                result_images[i].data = nullptr;
+            }
+        }
+        free(result_images);
+    }
+
+    auto msg = std::format("sd_generate_image(), {:d} results, {:%Y-%m-%d %X}", results.size(), std::chrono::current_zone()->to_local(std::chrono::system_clock::now()));
+    LOG_DEBUG(msg.c_str());
+    return results;
 }
+
+// c++17: fs::path::u8string() -> std::string
+inline const std::string& as_string(const std::string& s) noexcept {
+    return s;
+}
+
+#if __cplusplus >= 202002L
+
+// c++20: fs::path::u8string() -> std::u8string
+inline std::string as_string(const std::u8string& s) {
+    return {reinterpret_cast<const char*>(s.data()), s.size()};
+}
+
+#endif
 
 // K13 - end
 
@@ -461,8 +480,8 @@ int main(int argc, const char** argv) {
                     continue;
 
                 LoraEntry e;
-                e.name          = p.stem().u8string();
-                std::string rel = fs::relative(p, lora_dir).u8string();
+                e.name          = as_string(p.stem().u8string());
+                std::string rel = as_string(fs::relative(p, lora_dir).u8string());
                 std::replace(rel.begin(), rel.end(), '\\', '/');
                 e.path = rel;
 
@@ -503,6 +522,19 @@ int main(int argc, const char** argv) {
             res.status = 204;
             return httplib::Server::HandlerResponse::Handled;
         }
+        auto msg = std::format("{:%Y-%m-%d %X}, From {:s} : {:s}",
+                               std::chrono::current_zone()->to_local(std::chrono::system_clock::now()),
+                               req.remote_addr,
+                               req.path);
+        if (!req.body.empty()) {
+            if (req.body.size() > 1024) {
+                msg.append(" ***too big***");
+            } else {
+                msg.append(" body:\n");
+                msg.append(req.body);
+            }
+        }
+        LOG_DEBUG("%s", msg.c_str());
         return httplib::Server::HandlerResponse::Unhandled;
     });
 
@@ -640,30 +672,12 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            sd_image_t* results = sd_generate_image(svr_params, ctx_params, img_gen_params);
-            if (!results) {
-                report_server_error_json(res, "re-init context failed");
+            auto results = sd_generate_image(svr_params, ctx_params, img_gen_params, output_format, output_compression);
+            if (results.empty()) {
+                report_server_error_json(res, "sd_generate_image() failed");
                 return;
             }
-            int num_results = gen_params.batch_count;
-
-            for (int i = 0; i < num_results; i++) {
-                if (results[i].data == nullptr) {
-                    continue;
-                }
-                auto image_bytes = write_image_to_vector(output_format == "jpeg" ? ImageFormat::JPEG : ImageFormat::PNG,
-                                                         results[i].data,
-                                                         results[i].width,
-                                                         results[i].height,
-                                                         results[i].channel,
-                                                         output_compression);
-                if (image_bytes.empty()) {
-                    LOG_ERROR("write image to mem failed");
-                    continue;
-                }
-
-                // base64 encode
-                std::string b64 = base64_encode(image_bytes);
+            for (const auto& b64 : results) {
                 json item;
                 item["b64_json"] = b64;
                 out["data"].push_back(item);
@@ -869,9 +883,22 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            auto result_images = sd_generate_image(svr_params, ctx_params, img_gen_params);
-            auto results       = encode_images_base64(result_images, img_gen_params.batch_count, output_format, output_compression);
-            free_images(result_images, img_gen_params.batch_count);
+            auto results = sd_generate_image(svr_params, ctx_params, img_gen_params, output_format, output_compression);
+
+            if (init_image.data) {
+                stbi_image_free(init_image.data);
+            }
+            if (mask_image.data) {
+                stbi_image_free(mask_image.data);
+            }
+            for (auto& ref_image : ref_images) {
+                stbi_image_free(ref_image.data);
+            }
+
+            if (results.empty()) {
+                report_server_error_json(res, "sd_generate_image() failed");
+                return;
+            }
 
             json out;
             out["created"]       = static_cast<long long>(std::time(nullptr));
@@ -887,15 +914,6 @@ int main(int argc, const char** argv) {
             res.set_content(out.dump(), "application/json");
             res.status = 200;
 
-            if (init_image.data) {
-                stbi_image_free(init_image.data);
-            }
-            if (mask_image.data) {
-                stbi_image_free(mask_image.data);
-            }
-            for (auto ref_image : ref_images) {
-                stbi_image_free(ref_image.data);
-            }
         } catch (const std::exception& e) {
             report_server_error_json(res, e.what());
         }
@@ -1163,36 +1181,7 @@ int main(int argc, const char** argv) {
                 gen_params.cache_params,
             };
 
-            sd_image_t* results = sd_generate_image(svr_params, ctx_params, img_gen_params);
-            int num_results     = gen_params.batch_count;
-
-            json out;
-            out["images"]     = json::array();
-            out["parameters"] = j;  // TODO should return changed defaults
-            out["info"]       = "";
-
-            for (int i = 0; i < num_results; i++) {
-                if (results[i].data == nullptr) {
-                    continue;
-                }
-
-                auto image_bytes = write_image_to_vector(ImageFormat::PNG,
-                                                         results[i].data,
-                                                         results[i].width,
-                                                         results[i].height,
-                                                         results[i].channel);
-
-                if (image_bytes.empty()) {
-                    LOG_ERROR("write image to mem failed");
-                    continue;
-                }
-
-                std::string b64 = base64_encode(image_bytes);
-                out["images"].push_back(b64);
-            }
-
-            res.set_content(out.dump(), "application/json");
-            res.status = 200;
+            auto results = sd_generate_image(svr_params, ctx_params, img_gen_params, "png", 100);
 
             if (init_image.data) {
                 stbi_image_free(init_image.data);
@@ -1200,9 +1189,26 @@ int main(int argc, const char** argv) {
             if (mask_image.data && mask_data.empty()) {
                 stbi_image_free(mask_image.data);
             }
-            for (auto ref_image : ref_images) {
+            for (auto& ref_image : ref_images) {
                 stbi_image_free(ref_image.data);
             }
+
+            if (results.empty()) {
+                report_server_error_json(res, "sd_generate_image() failed");
+                return;
+            }
+
+            json out;
+            out["images"]     = json::array();
+            out["parameters"] = j;  // TODO should return changed defaults
+            out["info"]       = "";
+
+            for (const auto& b64 : results) {
+                out["images"].push_back(b64);
+            }
+
+            res.set_content(out.dump(), "application/json");
+            res.status = 200;
 
         } catch (const std::exception& e) {
             report_server_error_json(res, e.what());
